@@ -201,9 +201,9 @@ class Trainer:
 
                 if (self.lde_flag or self.lkd_flag or self.icarl_dist_flag) and self.model_old is not None:
                     with torch.no_grad():
-                        outputs_old, features_old = self.model_old(images, ret_intermediate=True)
+                        outputs_old, features_old1, features_old2 = self.model_old(images, ret_intermediate=True)
 
-                outputs, features = model(images, ret_intermediate=True)
+                outputs, features1, features2 = model(images, ret_intermediate=True)
 
                 # xxx BCE / Cross Entropy Loss
                 if not self.icarl_only_dist:
@@ -253,12 +253,12 @@ class Trainer:
             class_loss = torch.tensor(class_loss).to(self.device)
             reg_loss = torch.tensor(reg_loss).to(self.device)
 
-            torch.distributed.reduce(class_loss, dst=0)
-            torch.distributed.reduce(reg_loss, dst=0)
+            # torch.distributed.reduce(class_loss, dst=0)
+            # torch.distributed.reduce(reg_loss, dst=0)
 
-            if distributed.get_rank() == 0:
-                class_loss = class_loss / distributed.get_world_size() / len(loader)
-                reg_loss = reg_loss / distributed.get_world_size() / len(loader)
+            # if distributed.get_rank() == 0:
+            #     class_loss = class_loss / distributed.get_world_size() / len(loader)
+            #     reg_loss = reg_loss / distributed.get_world_size() / len(loader)
 
             if logger is not None:
                 logger.info(f"Validation, Class Loss={class_loss}, Reg Loss={reg_loss} (without scaling)")
