@@ -33,6 +33,7 @@ class Trainer:
             self.criterion = UnbiasedCrossEntropy(old_cl=self.old_classes, ignore_index=255, reduction=reduction)
         else:
             self.criterion = nn.CrossEntropyLoss(ignore_index=255, reduction=reduction)
+            print("NORMAL CROSS ENTROPY LOSS")
 
         # ILTSS
         self.lde = opts.loss_de
@@ -91,41 +92,41 @@ class Trainer:
             images = images.to(device, dtype=torch.float32)
             labels = labels.to(device, dtype=torch.long)
 
-            if (self.lde_flag or self.lkd_flag or self.icarl_dist_flag) and self.model_old is not None:
-                with torch.no_grad():
-                    outputs_old, features_old = self.model_old(images, ret_intermediate=self.ret_intermediate)
+            with torch.cuda.amp.autocast():
+                if (self.lde_flag or self.lkd_flag or self.icarl_dist_flag) and self.model_old is not None:
+                    with torch.no_grad():
+                        outputs_old, features_old = self.model_old(images, ret_intermediate=self.ret_intermediate)
 
-            optim.zero_grad()
-            outputs, features = model(images, ret_intermediate=self.ret_intermediate)
+                optim.zero_grad()
+                outputs, features1, features2 = model(images, ret_intermediate=self.ret_intermediate)
 
-            # xxx BCE / Cross Entropy Loss
-            if not self.icarl_only_dist:
-                loss = criterion(outputs, labels)  # B x H x W
-            else:
-                loss = self.licarl(outputs, labels, torch.sigmoid(outputs_old))
+                # xxx BCE / Cross Entropy Loss
+                if not self.icarl_only_dist:
+                    loss = criterion(outputs, labels)  # B x H x W
+                else:
+                    loss = self.licarl(outputs, labels, torch.sigmoid(outputs_old))
 
-            loss = loss.mean()  # scalar
+                if self.icarl_combined:
+                    # tensor.narrow( dim, start, end) -> slice tensor from start to end in the specified dim
+                    n_cl_old = outputs_old.shape[1]
+                    # use n_cl_old to sum the contribution of each class, and not to average them (as done in our BCE).
+                    l_icarl = self.icarl * n_cl_old * self.licarl(outputs.narrow(1, 0, n_cl_old),
+                                                                  torch.sigmoid(outputs_old))
 
-            if self.icarl_combined:
-                # tensor.narrow( dim, start, end) -> slice tensor from start to end in the specified dim
-                n_cl_old = outputs_old.shape[1]
-                # use n_cl_old to sum the contribution of each class, and not to average them (as done in our BCE).
-                l_icarl = self.icarl * n_cl_old * self.licarl(outputs.narrow(1, 0, n_cl_old),
-                                                              torch.sigmoid(outputs_old))
+                # xxx ILTSS (distillation on features or logits)
+                if self.lde_flag:
+                    lde = self.lde * self.lde_loss(features['body'], features_old['body'])
 
-            # xxx ILTSS (distillation on features or logits)
-            if self.lde_flag:
-                lde = self.lde * self.lde_loss(features['body'], features_old['body'])
+                if self.lkd_flag:
+                    # resize new output to remove new logits and keep only the old ones
+                    lkd = self.lkd * self.lkd_loss(outputs, outputs_old)
 
-            if self.lkd_flag:
-                # resize new output to remove new logits and keep only the old ones
-                lkd = self.lkd * self.lkd_loss(outputs, outputs_old)
+                # xxx first backprop of previous loss (compute the gradients for regularization methods)
+                loss_tot = loss + lkd + lde + l_icarl
 
-            # xxx first backprop of previous loss (compute the gradients for regularization methods)
-            loss_tot = loss + lkd + lde + l_icarl
-
-            with amp.scale_loss(loss_tot, optim) as scaled_loss:
-                scaled_loss.backward()
+#             with amp.scale_loss(loss_tot, optim) as scaled_loss:
+#                 scaled_loss.backward()
+            self.scaler.scale(loss_tot).backward()
 
             # xxx Regularizer (EWC, RW, PI)
             if self.regularizer_flag:
@@ -135,10 +136,13 @@ class Trainer:
                 if l_reg != 0.:
                     with amp.scale_loss(l_reg, optim) as scaled_loss:
                         scaled_loss.backward()
+                   
+#             optim.step()
+#             if scheduler is not None:
+#                 scheduler.step()
 
-            optim.step()
-            if scheduler is not None:
-                scheduler.step()
+            self.scaler.step(optim)
+            self.scaler.update()
 
             epoch_loss += loss.item()
             reg_loss += l_reg.item() if l_reg != 0. else 0.
