@@ -3,9 +3,6 @@ import torch.nn as nn
 from torch import distributed
 import torch.nn.functional as functional
 
-# import inplace_abn
-# from inplace_abn import InPlaceABNSync, InPlaceABN, ABN
-
 from functools import partial, reduce
 
 
