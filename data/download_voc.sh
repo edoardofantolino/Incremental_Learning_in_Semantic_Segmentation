@@ -2,7 +2,7 @@
 
 # use this script in the destination folder.
 
-wget http://host.robots.ox.ac.uk/pascal/VOC/voc2012/VOCtrainval_11-May-2012.tar
+wget http://pjreddie.com/media/files/VOCtrainval_11-May-2012.tar
 tar -xf VOCtrainval_11-May-2012.tar
 mkdir PascalVOC12
 mv VOCdevkit/VOC2012/* PascalVOC12
