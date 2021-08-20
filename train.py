@@ -67,6 +67,7 @@ class Trainer:
         self.reg_importance = opts.reg_importance
 
         self.ret_intermediate = self.lde
+        self.scaler=torch.cuda.amp.GradScaler()
 
     def train(self, cur_epoch, optim, train_loader, scheduler=None, print_int=10, logger=None):
         """Train and return epoch loss"""
@@ -95,10 +96,10 @@ class Trainer:
             with torch.cuda.amp.autocast():
                 if (self.lde_flag or self.lkd_flag or self.icarl_dist_flag) and self.model_old is not None:
                     with torch.no_grad():
-                        outputs_old, features_old = self.model_old(images, ret_intermediate=self.ret_intermediate)
+                        outputs_old, features_old1, feature_old2 = self.model_old(images, ret_intermediate=True)
 
                 optim.zero_grad()
-                outputs, features1, features2 = model(images, ret_intermediate=self.ret_intermediate)
+                outputs, features1, features2 = model(images, ret_intermediate=True)
 
                 # xxx BCE / Cross Entropy Loss
                 if not self.icarl_only_dist:
