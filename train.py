@@ -32,7 +32,7 @@ class Trainer:
         elif opts.unce and self.old_classes != 0:
             self.criterion = UnbiasedCrossEntropy(old_cl=self.old_classes, ignore_index=255, reduction=reduction)
         else:
-            self.criterion = nn.CrossEntropyLoss(ignore_index=255, reduction=reduction)
+            self.criterion = nn.CrossEntropyLoss(ignore_index=255)
             print("NORMAL CROSS ENTROPY LOSS")
 
         # ILTSS
