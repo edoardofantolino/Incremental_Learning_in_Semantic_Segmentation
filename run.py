@@ -3,7 +3,6 @@ import argparser
 import os
 from utils.logger import Logger
 
-from apex.parallel import DistributedDataParallel
 from apex import amp
 from torch.utils.data.distributed import DistributedSampler
 
@@ -183,7 +182,7 @@ def main(opts):
     if model_old is not None:
         [model, model_old], optimizer = amp.initialize([model.to(device), model_old.to(device)], optimizer,
                                                        opt_level=opts.opt_level)
-        model_old = DistributedDataParallel(model_old)
+#         model_old = DistributedDataParallel(model_old)
     else:
         model, optimizer = amp.initialize(model.to(device), optimizer, opt_level=opts.opt_level)
 
@@ -351,7 +350,7 @@ def main(opts):
     if TRAIN:
         model = make_model(opts, classes=tasks.get_per_task_classes(opts.dataset, opts.task, opts.step))
         # Put the model on GPU
-        model = DistributedDataParallel(model.cuda(device))
+#         model = DistributedDataParallel(model.cuda(device))
         ckpt = f"checkpoints/step/{task_name}_{opts.name}_{opts.step}.pth"
         checkpoint = torch.load(ckpt, map_location="cpu")
         model.load_state_dict(checkpoint["model_state"])
