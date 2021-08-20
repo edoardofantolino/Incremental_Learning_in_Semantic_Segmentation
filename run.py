@@ -12,7 +12,7 @@ import torch
 from torch.utils import data
 from torch import distributed
 
-from dataset import VOCSegmentationIncremental, AdeSegmentationIncremental
+from dataset import VOCSegmentationIncremental
 from dataset import transform
 from metrics import StreamSegMetrics
 
@@ -103,10 +103,9 @@ def get_dataset(opts):
 
 
 def main(opts):
-    distributed.init_process_group(backend='nccl', init_method='env://')
-    device_id, device = opts.local_rank, torch.device(opts.local_rank)
-    rank, world_size = distributed.get_rank(), distributed.get_world_size()
-    torch.cuda.set_device(device_id)
+    rank = 0
+    device_id = 0
+    device = torch.device(0)
 
     # Initialize logging
     task_name = f"{opts.task}-{opts.dataset}"
@@ -130,14 +129,12 @@ def main(opts):
     random.seed(opts.random_seed)
 
     train_loader = data.DataLoader(train_dst, batch_size=opts.batch_size,
-                                   sampler=DistributedSampler(train_dst, num_replicas=world_size, rank=rank),
                                    num_workers=opts.num_workers, drop_last=True)
     val_loader = data.DataLoader(val_dst, batch_size=opts.batch_size if opts.crop_val else 1,
-                                 sampler=DistributedSampler(val_dst, num_replicas=world_size, rank=rank),
                                  num_workers=opts.num_workers)
     logger.info(f"Dataset: {opts.dataset}, Train set: {len(train_dst)}, Val set: {len(val_dst)},"
                 f" Test set: {len(test_dst)}, n_classes {n_classes}")
-    logger.info(f"Total batch size is {opts.batch_size * world_size}")
+    # logger.info(f"Total batch size is {opts.batch_size * world_size}")
 
     # xxx Set up model
     logger.info(f"Backbone: {opts.backbone}")
@@ -158,12 +155,12 @@ def main(opts):
 
     # xxx Set up optimizer
     params = []
-    if not opts.freeze:
-        params.append({"params": filter(lambda p: p.requires_grad, model.body.parameters()),
-                       'weight_decay': opts.weight_decay})
+    # if not opts.freeze:
+    #     params.append({"params": filter(lambda p: p.requires_grad, model.parameters()),
+    #                    'weight_decay': opts.weight_decay})
 
-    params.append({"params": filter(lambda p: p.requires_grad, model.head.parameters()),
-                   'weight_decay': opts.weight_decay})
+    # params.append({"params": filter(lambda p: p.requires_grad, model.parameters()),
+    #                'weight_decay': opts.weight_decay})
 
     params.append({"params": filter(lambda p: p.requires_grad, model.cls.parameters()),
                    'weight_decay': opts.weight_decay})
@@ -187,7 +184,7 @@ def main(opts):
         model, optimizer = amp.initialize(model.to(device), optimizer, opt_level=opts.opt_level)
 
     # Put the model on GPU
-    model = DistributedDataParallel(model, delay_allreduce=True)
+    # model = DistributedDataParallel(model, delay_allreduce=True)
 
     # xxx Load old model from old weights if step > 0!
     if opts.step > 0:
@@ -301,7 +298,7 @@ def main(opts):
             if rank == 0:  # save best model at the last iteration
                 score = val_score['Mean IoU']
                 # best model to build incremental steps
-                save_ckpt(f"checkpoints/step/{task_name}_{opts.name}_{opts.step}.pth",
+                save_ckpt(f"/content/gdrive/MyDrive/exp2/{task_name}_{opts.name}_{opts.step}.pth",
                           model, trainer, optimizer, scheduler, cur_epoch, score)
                 logger.info("[!] Checkpoint saved.")
 
@@ -333,7 +330,7 @@ def main(opts):
     # =====  Save Best Model at the end of training =====
     if rank == 0 and TRAIN:  # save best model at the last iteration
         # best model to build incremental steps
-        save_ckpt(f"checkpoints/step/{task_name}_{opts.name}_{opts.step}.pth",
+        save_ckpt(f"/content/gdrive/MyDrive/exp2/{task_name}_{opts.name}_{opts.step}.pth",
                   model, trainer, optimizer, scheduler, cur_epoch, best_score)
         logger.info("[!] Checkpoint saved.")
 
@@ -351,7 +348,7 @@ def main(opts):
         model = make_model(opts, classes=tasks.get_per_task_classes(opts.dataset, opts.task, opts.step))
         # Put the model on GPU
 #         model = DistributedDataParallel(model.cuda(device))
-        ckpt = f"checkpoints/step/{task_name}_{opts.name}_{opts.step}.pth"
+        ckpt = f"/content/gdrive/MyDrive/exp2/{task_name}_{opts.name}_{opts.step}.pth"
         checkpoint = torch.load(ckpt, map_location="cpu")
         model.load_state_dict(checkpoint["model_state"])
         logger.info(f"*** Model restored from {ckpt}")
