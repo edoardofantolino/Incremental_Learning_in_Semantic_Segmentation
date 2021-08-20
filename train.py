@@ -84,7 +84,7 @@ class Trainer:
         l_icarl = torch.tensor(0.)
         l_reg = torch.tensor(0.)
 
-        train_loader.sampler.set_epoch(cur_epoch)
+        # train_loader.sampler.set_epoch(cur_epoch)
 
         model.train()
         for cur_step, (images, labels) in enumerate(train_loader):
