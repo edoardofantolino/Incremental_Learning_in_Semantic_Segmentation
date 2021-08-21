@@ -92,6 +92,8 @@ class Trainer:
                 loss = loss + criterion(features1, labels)
                 loss = loss + criterion(features2, labels)
 
+                loss = loss.mean()  # scalar
+
                 # xxx ILTSS (distillation on features or logits)
                 if self.lde_flag:
                     lde = self.lde * self.lde_loss(features1, features_old1)
@@ -188,6 +190,8 @@ class Trainer:
                 loss = criterion(outputs, labels)  # B x H x W
                 # else:
                 #     loss = self.licarl(outputs, labels, torch.sigmoid(outputs_old))
+
+                loss = loss.mean()  # scalar
 
                 # if self.icarl_combined:
                 #     # tensor.narrow( dim, start, end) -> slice tensor from start to end in the specified dim
