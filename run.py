@@ -166,7 +166,9 @@ def main(opts):
                    'weight_decay': opts.weight_decay})
 
 #     optimizer = torch.optim.SGD(params, lr=opts.lr, momentum=0.9, nesterov=True)
-    optimizer = torch.optim.SGD(params, lr=opts.lr, momentum=0.9, weight_decay=1e-4)
+    # optimizer = torch.optim.SGD(params, lr=opts.lr, momentum=0.9, weight_decay=1e-4)
+    optimizer = torch.optim.SGD(model.parameters(), 0.03125, momentum=0.9, weight_decay=1e-4)
+
 
     if opts.lr_policy == 'poly':
         scheduler = utils.PolyLR(optimizer, max_iters=opts.epochs * len(train_loader), power=opts.lr_power)
