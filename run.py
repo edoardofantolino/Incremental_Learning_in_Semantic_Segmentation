@@ -167,7 +167,7 @@ def main(opts):
 
 #     optimizer = torch.optim.SGD(params, lr=opts.lr, momentum=0.9, nesterov=True)
     # optimizer = torch.optim.SGD(params, lr=opts.lr, momentum=0.9, weight_decay=1e-4)
-    optimizer = torch.optim.SGD(model.parameters(), 0.03125, momentum=0.9, weight_decay=1e-4)
+    optimizer = torch.optim.SGD(model.parameters(), opts.lr, momentum=0.9, weight_decay=1e-4)
 
 
     if opts.lr_policy == 'poly':
@@ -268,7 +268,7 @@ def main(opts):
     # check if random is equal here.
     logger.print(torch.randint(0,100, (1,1)))
     # train/val here
-    while cur_epoch < 5 and TRAIN:
+    while cur_epoch < opts.epochs and TRAIN:
         # =====  Train  =====
         model.train()
 
@@ -300,7 +300,7 @@ def main(opts):
             if rank == 0:  # save best model at the last iteration
                 score = val_score['Mean IoU']
                 # best model to build incremental steps
-                save_ckpt(f"/content/gdrive/MyDrive/exp2/{task_name}_{opts.name}_{opts.step}.pth",
+                save_ckpt(f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}.pth",
                           model, trainer, optimizer, scheduler, cur_epoch, score)
                 logger.info("[!] Checkpoint saved.")
 
@@ -332,7 +332,7 @@ def main(opts):
     # =====  Save Best Model at the end of training =====
     if rank == 0 and TRAIN:  # save best model at the last iteration
         # best model to build incremental steps
-        save_ckpt(f"/content/gdrive/MyDrive/exp2/{task_name}_{opts.name}_{opts.step}.pth",
+        save_ckpt(f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}.pth",
                   model, trainer, optimizer, scheduler, cur_epoch, best_score)
         logger.info("[!] Checkpoint saved.")
 
@@ -342,7 +342,7 @@ def main(opts):
     logger.info("*** Test the model on all seen classes...")
     # make data loader
     test_loader = data.DataLoader(test_dst, batch_size=opts.batch_size if opts.crop_val else 1,
-                                  sampler=DistributedSampler(test_dst, num_replicas=world_size, rank=rank),
+                                  # sampler=DistributedSampler(test_dst, num_replicas=world_size, rank=rank),
                                   num_workers=opts.num_workers)
 
     # load best model
@@ -350,7 +350,7 @@ def main(opts):
         model = make_model(opts, classes=tasks.get_per_task_classes(opts.dataset, opts.task, opts.step))
         # Put the model on GPU
 #         model = DistributedDataParallel(model.cuda(device))
-        ckpt = f"/content/gdrive/MyDrive/exp2/{task_name}_{opts.name}_{opts.step}.pth"
+        ckpt = f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}.pth"
         checkpoint = torch.load(ckpt, map_location="cpu")
         model.load_state_dict(checkpoint["model_state"])
         logger.info(f"*** Model restored from {ckpt}")
