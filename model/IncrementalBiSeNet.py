@@ -142,7 +142,7 @@ class IncrementalBiSeNet(torch.nn.Module):
                     nn.init.constant_(m.weight, 1)
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, input):
+    def forward(self, input, ret_intermediate=False):
         # output of spatial path
         sx = self.spatial_path(input)
 
@@ -157,7 +157,7 @@ class IncrementalBiSeNet(torch.nn.Module):
         cx2 = torch.nn.functional.interpolate(cx2, size=sx.size()[-2:], mode='bilinear')
         cx = torch.cat((cx1, cx2), dim=1)
 
-        if self.training == True:
+        if ret_intermediate == True:
             cx1_sup = self.supervision1(cx1)
             cx2_sup = self.supervision2(cx2)
             cx1_sup = torch.nn.functional.interpolate(cx1_sup, size=input.size()[-2:], mode='bilinear')
@@ -177,7 +177,7 @@ class IncrementalBiSeNet(torch.nn.Module):
             )
         result = torch.cat(out, dim=1)  # 1 is the dimension of classes
 
-        if self.training == True:
+        if ret_intermediate == True:
             return result, cx1_sup, cx2_sup
 
         return result
