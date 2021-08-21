@@ -77,6 +77,8 @@ class Trainer:
         model = self.model
         criterion = self.criterion
 
+        optim = torch.optim.SGD(model.parameters(), 0.03125, momentum=0.9, weight_decay=1e-4)
+
         epoch_loss = 0.0
         reg_loss = 0.0
         interval_loss = 0.0
@@ -102,25 +104,9 @@ class Trainer:
                 outputs, features1, features2 = model(images, ret_intermediate=True)
 
                 # xxx BCE / Cross Entropy Loss
-                if not self.icarl_only_dist:
-                    loss = criterion(outputs, labels)  # B x H x W
-                else:
-                    loss = self.licarl(outputs, labels, torch.sigmoid(outputs_old))
-
-                if self.icarl_combined:
-                    # tensor.narrow( dim, start, end) -> slice tensor from start to end in the specified dim
-                    n_cl_old = outputs_old.shape[1]
-                    # use n_cl_old to sum the contribution of each class, and not to average them (as done in our BCE).
-                    l_icarl = self.icarl * n_cl_old * self.licarl(outputs.narrow(1, 0, n_cl_old),
-                                                                  torch.sigmoid(outputs_old))
-
-                # xxx ILTSS (distillation on features or logits)
-                if self.lde_flag:
-                    lde = self.lde * self.lde_loss(features['body'], features_old['body'])
-
-                if self.lkd_flag:
-                    # resize new output to remove new logits and keep only the old ones
-                    lkd = self.lkd * self.lkd_loss(outputs, outputs_old)
+                loss = criterion(outputs, labels)
+                loss = loss + criterion(features1, labels)
+                loss = loss + criterion(features2, labels)
 
                 # xxx first backprop of previous loss (compute the gradients for regularization methods)
                 loss_tot = loss + lkd + lde + l_icarl
@@ -130,13 +116,13 @@ class Trainer:
             self.scaler.scale(loss_tot).backward()
 
             # xxx Regularizer (EWC, RW, PI)
-            if self.regularizer_flag:
-                if distributed.get_rank() == 0:
-                    self.regularizer.update()
-                l_reg = self.reg_importance * self.regularizer.penalty()
-                if l_reg != 0.:
-                    with amp.scale_loss(l_reg, optim) as scaled_loss:
-                        scaled_loss.backward()
+            # if self.regularizer_flag:
+            #     if distributed.get_rank() == 0:
+            #         self.regularizer.update()
+            #     l_reg = self.reg_importance * self.regularizer.penalty()
+            #     if l_reg != 0.:
+            #         with amp.scale_loss(l_reg, optim) as scaled_loss:
+            #             scaled_loss.backward()
                    
 #             optim.step()
 #             if scheduler is not None:
@@ -210,8 +196,6 @@ class Trainer:
                     loss = criterion(outputs, labels)  # B x H x W
                 else:
                     loss = self.licarl(outputs, labels, torch.sigmoid(outputs_old))
-
-                loss = loss.mean()  # scalar
 
                 if self.icarl_combined:
                     # tensor.narrow( dim, start, end) -> slice tensor from start to end in the specified dim
