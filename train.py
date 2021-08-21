@@ -77,8 +77,6 @@ class Trainer:
         model = self.model
         criterion = self.criterion
 
-        optim = torch.optim.SGD(model.parameters(), 0.03125, momentum=0.9, weight_decay=1e-4)
-
         epoch_loss = 0.0
         reg_loss = 0.0
         interval_loss = 0.0
