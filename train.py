@@ -47,19 +47,6 @@ class Trainer:
         else:
             self.lkd_loss = KnowledgeDistillationLoss(alpha=opts.alpha)
 
-        # ICARL
-        self.icarl_combined = False
-        self.icarl_only_dist = False
-        if opts.icarl:
-            self.icarl_combined = not opts.icarl_disjoint and model_old is not None
-            self.icarl_only_dist = opts.icarl_disjoint and model_old is not None
-            if self.icarl_combined:
-                self.licarl = nn.BCEWithLogitsLoss(reduction='mean')
-                self.icarl = opts.icarl_importance
-            elif self.icarl_only_dist:
-                self.licarl = IcarlLoss(reduction='mean', bkg=opts.icarl_bkg)
-        self.icarl_dist_flag = self.icarl_only_dist or self.icarl_combined
-
         # Regularization
         regularizer_state = trainer_state['regularizer'] if trainer_state is not None else None
         self.regularizer = get_regularizer(model, model_old, device, opts, regularizer_state)
@@ -82,7 +69,6 @@ class Trainer:
         interval_loss = 0.0
         lkd = torch.tensor(0.)
         lde = torch.tensor(0.)
-        l_icarl = torch.tensor(0.)
         l_reg = torch.tensor(0.)
 
         # train_loader.sampler.set_epoch(cur_epoch)
@@ -94,7 +80,7 @@ class Trainer:
             labels = labels.to(device, dtype=torch.long)
 
             with torch.cuda.amp.autocast():
-                if (self.lde_flag or self.lkd_flag or self.icarl_dist_flag) and self.model_old is not None:
+                if (self.lde_flag or self.lkd_flag) and self.model_old is not None:
                     with torch.no_grad():
                         outputs_old, features_old1, feature_old2 = self.model_old(images, ret_intermediate=True)
 
@@ -106,8 +92,16 @@ class Trainer:
                 loss = loss + criterion(features1, labels)
                 loss = loss + criterion(features2, labels)
 
+                # xxx ILTSS (distillation on features or logits)
+                if self.lde_flag:
+                    lde = self.lde * self.lde_loss(features1, features_old1)
+
+                if self.lkd_flag:
+                    # resize new output to remove new logits and keep only the old ones
+                    lkd = self.lkd * self.lkd_loss(outputs, outputs_old)
+
                 # xxx first backprop of previous loss (compute the gradients for regularization methods)
-                loss_tot = loss + lkd + lde + l_icarl
+                loss_tot = loss + lkd + lde
 
 #             with amp.scale_loss(loss_tot, optim) as scaled_loss:
 #                 scaled_loss.backward()
@@ -131,8 +125,8 @@ class Trainer:
 
             epoch_loss += loss.item()
             reg_loss += l_reg.item() if l_reg != 0. else 0.
-            reg_loss += lkd.item() + lde.item() + l_icarl.item()
-            interval_loss += loss.item() + lkd.item() + lde.item() + l_icarl.item()
+            reg_loss += lkd.item() + lde.item()
+            interval_loss += loss.item() + lkd.item() + lde.item()
             interval_loss += l_reg.item() if l_reg != 0. else 0.
 
             if (cur_step + 1) % print_int == 0:
@@ -183,7 +177,7 @@ class Trainer:
                 images = images.to(device, dtype=torch.float32)
                 labels = labels.to(device, dtype=torch.long)
 
-                if (self.lde_flag or self.lkd_flag or self.icarl_dist_flag) and self.model_old is not None:
+                if (self.lde_flag or self.lkd_flag) and self.model_old is not None:
                     with torch.no_grad():
                         outputs_old, features_old1, features_old2 = self.model_old(images, ret_intermediate=True)
 
@@ -204,7 +198,7 @@ class Trainer:
 
                 # xxx ILTSS (distillation on features or logits)
                 if self.lde_flag:
-                    lde = self.lde_loss(features['body'], features_old['body'])
+                    lde = self.lde_loss(features1, features_old1)
 
                 if self.lkd_flag:
                     lkd = self.lkd_loss(outputs, outputs_old)
@@ -215,7 +209,7 @@ class Trainer:
 
                 class_loss += loss.item()
                 reg_loss += l_reg.item() if l_reg != 0. else 0.
-                reg_loss += lkd.item() + lde.item() + l_icarl.item()
+                reg_loss += lkd.item() + lde.item()
 
                 _, prediction = outputs.max(dim=1)
 
