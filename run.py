@@ -268,7 +268,7 @@ def main(opts):
     # check if random is equal here.
     logger.print(torch.randint(0,100, (1,1)))
     # train/val here
-    while cur_epoch < opts.epochs and TRAIN:
+    while cur_epoch < 5 and TRAIN:
         # =====  Train  =====
         model.train()
 
@@ -357,6 +357,7 @@ def main(opts):
         del checkpoint
         trainer = Trainer(model, None, device=device, opts=opts)
 
+    model = model.cuda()
     model.eval()
 
     val_loss, val_score, _ = trainer.validate(loader=test_loader, metrics=val_metrics, logger=logger)
