@@ -1,390 +1,255 @@
-import utils
-import argparser
-import os
-from utils.logger import Logger
-
-from apex import amp
-from torch.utils.data.distributed import DistributedSampler
-
-import numpy as np
-import random
 import torch
-from torch.utils import data
 from torch import distributed
+import torch.nn as nn
+from apex import amp
+from functools import reduce
 
-from dataset import VOCSegmentationIncremental
-from dataset import transform
-from metrics import StreamSegMetrics
-
-from segmentation_module import make_model
-
-from train import Trainer
-import tasks
+from utils.loss import KnowledgeDistillationLoss, BCEWithLogitsLossWithIgnoreIndex, \
+    UnbiasedKnowledgeDistillationLoss, UnbiasedCrossEntropy, IcarlLoss
+from utils import get_regularizer
 
 
-def save_ckpt(path, model, trainer, optimizer, scheduler, epoch, best_score):
-    """ save current model
-    """
-    state = {
-        "epoch": epoch,
-        "model_state": model.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
-        "scheduler_state": scheduler.state_dict(),
-        "best_score": best_score,
-        "trainer_state": trainer.state_dict()
-    }
-    torch.save(state, path)
+class Trainer:
+    def __init__(self, model, model_old, device, opts, trainer_state=None, classes=None):
 
+        self.model_old = model_old
+        self.model = model
+        self.device = device
 
-def get_dataset(opts):
-    """ Dataset And Augmentation
-    """
-    train_transform = transform.Compose([
-        transform.RandomResizedCrop(opts.crop_size, (0.5, 2.0)),
-        transform.RandomHorizontalFlip(),
-        transform.ToTensor(),
-        transform.Normalize(mean=[0.485, 0.456, 0.406],
-                            std=[0.229, 0.224, 0.225]),
-    ])
-
-    if opts.crop_val:
-        val_transform = transform.Compose([
-            transform.Resize(size=opts.crop_size),
-            transform.CenterCrop(size=opts.crop_size),
-            transform.ToTensor(),
-            transform.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225]),
-        ])
-    else:
-        # no crop, batch size = 1
-        val_transform = transform.Compose([
-            transform.ToTensor(),
-            transform.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225]),
-        ])
-
-    labels, labels_old, path_base = tasks.get_task_labels(opts.dataset, opts.task, opts.step)
-    labels_cum = labels_old + labels
-
-    if opts.dataset == 'voc':
-        dataset = VOCSegmentationIncremental
-    elif opts.dataset == 'ade':
-        dataset = AdeSegmentationIncremental
-    else:
-        raise NotImplementedError
-
-    if opts.overlap:
-        path_base += "-ov"
-
-    if not os.path.exists(path_base):
-        os.makedirs(path_base, exist_ok=True)
-
-    train_dst = dataset(root=opts.data_root, train=True, transform=train_transform,
-                        labels=list(labels), labels_old=list(labels_old),
-                        idxs_path=path_base + f"/train-{opts.step}.npy",
-                        masking=not opts.no_mask, overlap=opts.overlap)
-
-    if not opts.no_cross_val:  # if opts.cross_val:
-        train_len = int(0.8 * len(train_dst))
-        val_len = len(train_dst)-train_len
-        train_dst, val_dst = torch.utils.data.random_split(train_dst, [train_len, val_len])
-    else:  # don't use cross_val
-        val_dst = dataset(root=opts.data_root, train=False, transform=val_transform,
-                          labels=list(labels), labels_old=list(labels_old),
-                          idxs_path=path_base + f"/val-{opts.step}.npy",
-                          masking=not opts.no_mask, overlap=True)
-
-    image_set = 'train' if opts.val_on_trainset else 'val'
-    test_dst = dataset(root=opts.data_root, train=opts.val_on_trainset, transform=val_transform,
-                       labels=list(labels_cum),
-                       idxs_path=path_base + f"/test_on_{image_set}-{opts.step}.npy")
-
-    return train_dst, val_dst, test_dst, len(labels_cum)
-
-
-def main(opts):
-    rank = 0
-    device_id = 0
-    device = torch.device(0)
-
-    # Initialize logging
-    task_name = f"{opts.task}-{opts.dataset}"
-    logdir_full = f"{opts.logdir}/{task_name}/{opts.name}/"
-    if rank == 0:
-        logger = Logger(logdir_full, rank=rank, debug=opts.debug, summary=opts.visualize, step=opts.step)
-    else:
-        logger = Logger(logdir_full, rank=rank, debug=opts.debug, summary=False)
-
-    logger.print(f"Device: {device}")
-
-    # Set up random seed
-    torch.manual_seed(opts.random_seed)
-    torch.cuda.manual_seed(opts.random_seed)
-    np.random.seed(opts.random_seed)
-    random.seed(opts.random_seed)
-
-    # xxx Set up dataloader
-    train_dst, val_dst, test_dst, n_classes = get_dataset(opts)
-    # reset the seed, this revert changes in random seed
-    random.seed(opts.random_seed)
-
-    train_loader = data.DataLoader(train_dst, batch_size=opts.batch_size,
-                                   num_workers=opts.num_workers, drop_last=True)
-    val_loader = data.DataLoader(val_dst, batch_size=opts.batch_size if opts.crop_val else 1,
-                                 num_workers=opts.num_workers)
-    logger.info(f"Dataset: {opts.dataset}, Train set: {len(train_dst)}, Val set: {len(val_dst)},"
-                f" Test set: {len(test_dst)}, n_classes {n_classes}")
-    # logger.info(f"Total batch size is {opts.batch_size * world_size}")
-
-    # xxx Set up model
-    logger.info(f"Backbone: {opts.backbone}")
-
-    step_checkpoint = None
-    model = make_model(opts, classes=tasks.get_per_task_classes(opts.dataset, opts.task, opts.step))
-    logger.info(f"[!] Model made with{'out' if opts.no_pretrained else ''} pre-trained")
-
-    if opts.step == 0:  # if step 0, we don't need to instance the model_old
-        model_old = None
-    else:  # instance model_old
-        model_old = make_model(opts, classes=tasks.get_per_task_classes(opts.dataset, opts.task, opts.step - 1))
-
-    if opts.fix_bn:
-        model.fix_bn()
-
-    logger.debug(model)
-
-    # xxx Set up optimizer
-    params = []
-    # if not opts.freeze:
-    #     params.append({"params": filter(lambda p: p.requires_grad, model.parameters()),
-    #                    'weight_decay': opts.weight_decay})
-
-    # params.append({"params": filter(lambda p: p.requires_grad, model.parameters()),
-    #                'weight_decay': opts.weight_decay})
-
-    params.append({"params": filter(lambda p: p.requires_grad, model.cls.parameters()),
-                   'weight_decay': opts.weight_decay})
-
-#     optimizer = torch.optim.SGD(params, lr=opts.lr, momentum=0.9, nesterov=True)
-    # optimizer = torch.optim.SGD(params, lr=opts.lr, momentum=0.9, weight_decay=1e-4)
-    optimizer = torch.optim.SGD(model.parameters(), opts.lr, momentum=0.9, weight_decay=1e-4)
-
-
-    if opts.lr_policy == 'poly':
-        scheduler = utils.PolyLR(optimizer, max_iters=opts.epochs * len(train_loader), power=opts.lr_power)
-    elif opts.lr_policy == 'step':
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=opts.lr_decay_step, gamma=opts.lr_decay_factor)
-    else:
-        raise NotImplementedError
-    logger.debug("Optimizer:\n%s" % optimizer)
-
-    if model_old is not None:
-        [model, model_old], optimizer = amp.initialize([model.to(device), model_old.to(device)], optimizer,
-                                                       opt_level=opts.opt_level)
-#         model_old = DistributedDataParallel(model_old)
-    else:
-        model, optimizer = amp.initialize(model.to(device), optimizer, opt_level=opts.opt_level)
-
-    # Put the model on GPU
-    # model = DistributedDataParallel(model, delay_allreduce=True)
-
-    # xxx Load old model from old weights if step > 0!
-    if opts.step > 0:
-        # get model path
-        if opts.step_ckpt is not None:
-            path = opts.step_ckpt
+        if classes is not None:
+            new_classes = classes[-1]
+            tot_classes = reduce(lambda a, b: a + b, classes)
+            self.old_classes = tot_classes - new_classes
         else:
-            path = f"checkpoints/step/{task_name}_{opts.name}_{opts.step - 1}.pth"
+            self.old_classes = 0
 
-        # generate model from path
-        if os.path.exists(path):
-            step_checkpoint = torch.load(path, map_location="cpu")
-            model.load_state_dict(step_checkpoint['model_state'], strict=False)  # False because of incr. classifiers
-            if opts.init_balanced:
-                # implement the balanced initialization (new cls has weight of background and bias = bias_bkg - log(N+1)
-                model.init_new_classifier(device)
-            # Load state dict from the model state dict, that contains the old model parameters
-            model_old.load_state_dict(step_checkpoint['model_state'], strict=True)  # Load also here old parameters
-            logger.info(f"[!] Previous model loaded from {path}")
-            # clean memory
-            del step_checkpoint['model_state']
-        elif opts.debug:
-            logger.info(f"[!] WARNING: Unable to find of step {opts.step - 1}! Do you really want to do from scratch?")
+        # Select the Loss Type
+        reduction = 'none'
+
+        self.bce = opts.bce or opts.icarl
+        if self.bce:
+            self.criterion = BCEWithLogitsLossWithIgnoreIndex(reduction=reduction)
+        elif opts.unce and self.old_classes != 0:
+            self.criterion = UnbiasedCrossEntropy(old_cl=self.old_classes, ignore_index=255, reduction=reduction)
         else:
-            raise FileNotFoundError(path)
-        # put the old model into distributed memory and freeze it
-        for par in model_old.parameters():
-            par.requires_grad = False
-        model_old.eval()
+            self.criterion = nn.CrossEntropyLoss(ignore_index=255)
+            print("NORMAL CROSS ENTROPY LOSS")
 
-    # xxx Set up Trainer
-    trainer_state = None
-    # if not first step, then instance trainer from step_checkpoint
-    if opts.step > 0 and step_checkpoint is not None:
-        if 'trainer_state' in step_checkpoint:
-            trainer_state = step_checkpoint['trainer_state']
+        # ILTSS
+        self.lde = opts.loss_de
+        self.lde_flag = self.lde > 0. and model_old is not None
+        self.lde_loss = nn.MSELoss()
 
-    # instance trainer (model must have already the previous step weights)
-    trainer = Trainer(model, model_old, device=device, opts=opts, trainer_state=trainer_state,
-                      classes=tasks.get_per_task_classes(opts.dataset, opts.task, opts.step))
+        self.lkd = opts.loss_kd
+        self.lkd_flag = self.lkd > 0. and model_old is not None
+        if opts.unkd:
+            self.lkd_loss = UnbiasedKnowledgeDistillationLoss(alpha=opts.alpha)
+        else:
+            self.lkd_loss = KnowledgeDistillationLoss(alpha=opts.alpha)
 
-    # xxx Handle checkpoint for current model (model old will always be as previous step or None)
-    best_score = 0.0
-    cur_epoch = 0
-    if opts.ckpt is not None and os.path.isfile(opts.ckpt):
-        checkpoint = torch.load(opts.ckpt, map_location="cpu")
-        model.load_state_dict(checkpoint["model_state"], strict=True)
-        optimizer.load_state_dict(checkpoint["optimizer_state"])
-        scheduler.load_state_dict(checkpoint["scheduler_state"])
-        cur_epoch = checkpoint["epoch"] + 1
-        best_score = checkpoint['best_score']
-        logger.info("[!] Model restored from %s" % opts.ckpt)
-        # if we want to resume training, resume trainer from checkpoint
-        if 'trainer_state' in checkpoint:
-            trainer.load_state_dict(checkpoint['trainer_state'])
-        del checkpoint
-    else:
-        if opts.step == 0:
-            logger.info("[!] Train from scratch")
+        # Regularization
+        regularizer_state = trainer_state['regularizer'] if trainer_state is not None else None
+        self.regularizer = get_regularizer(model, model_old, device, opts, regularizer_state)
+        self.regularizer_flag = self.regularizer is not None
+        self.reg_importance = opts.reg_importance
 
-    # xxx Train procedure
-    # print opts before starting training to log all parameters
-    logger.add_table("Opts", vars(opts))
+        self.ret_intermediate = self.lde
+        self.scaler=torch.cuda.amp.GradScaler()
 
-    if rank == 0 and opts.sample_num > 0:
-        sample_ids = np.random.choice(len(val_loader), opts.sample_num, replace=False)  # sample idxs for visualization
-        logger.info(f"The samples id are {sample_ids}")
-    else:
-        sample_ids = None
+    def train(self, cur_epoch, optim, train_loader, scheduler=None, print_int=10, logger=None):
+        """Train and return epoch loss"""
+        logger.info("Epoch %d, lr = %f" % (cur_epoch, optim.param_groups[0]['lr']))
 
-    label2color = utils.Label2Color(cmap=utils.color_map(opts.dataset))  # convert labels to images
-    denorm = utils.Denormalize(mean=[0.485, 0.456, 0.406],
-                               std=[0.229, 0.224, 0.225])  # de-normalization for original images
+        device = self.device
+        model = self.model
+        criterion = self.criterion
 
-    TRAIN = not opts.test
-    val_metrics = StreamSegMetrics(n_classes)
-    results = {}
+        epoch_loss = 0.0
+        reg_loss = 0.0
+        interval_loss = 0.0
+        lkd = torch.tensor(0.)
+        lde = torch.tensor(0.)
+        l_reg = torch.tensor(0.)
 
-    # check if random is equal here.
-    logger.print(torch.randint(0,100, (1,1)))
-    # train/val here
-    while cur_epoch < 20 and TRAIN:
-        # =====  Train  =====
+        # train_loader.sampler.set_epoch(cur_epoch)
+
         model.train()
+        for cur_step, (images, labels) in enumerate(train_loader):
 
-        epoch_loss = trainer.train(cur_epoch=cur_epoch, optim=optimizer,
-                                   train_loader=train_loader, scheduler=scheduler, logger=logger)
+            images = images.to(device, dtype=torch.float32)
+            labels = labels.to(device, dtype=torch.long)
 
-        logger.info(f"End of Epoch {cur_epoch}/{opts.epochs}, Average Loss={epoch_loss[0]+epoch_loss[1]},"
-                    f" Class Loss={epoch_loss[0]}, Reg Loss={epoch_loss[1]}")
+            with torch.cuda.amp.autocast():
+                if (self.lde_flag or self.lkd_flag) and self.model_old is not None:
+                    with torch.no_grad():
+                        outputs_old, features_old1, feature_old2 = self.model_old(images, ret_intermediate=True)
 
-        # =====  Log metrics on Tensorboard =====
-        logger.add_scalar("E-Loss", epoch_loss[0]+epoch_loss[1], cur_epoch)
-        logger.add_scalar("E-Loss-reg", epoch_loss[1], cur_epoch)
-        logger.add_scalar("E-Loss-cls", epoch_loss[0], cur_epoch)
+                optim.zero_grad()
+                outputs, features1, features2 = model(images, ret_intermediate=True)
 
-        # =====  Validation  =====
-        if (cur_epoch + 1) % opts.val_interval == 0:
-            logger.info("validate on val set...")
-            model.eval()
-            val_loss, val_score, ret_samples = trainer.validate(loader=val_loader, metrics=val_metrics,
-                                                                ret_samples_ids=sample_ids, logger=logger)
+                # xxx BCE / Cross Entropy Loss
+                loss = criterion(outputs, labels)
+                loss = loss + criterion(features1, labels)
+                loss = loss + criterion(features2, labels)
 
-            logger.print("Done validation")
-            logger.info(f"End of Validation {cur_epoch}/{opts.epochs}, Validation Loss={val_loss[0]+val_loss[1]},"
-                        f" Class Loss={val_loss[0]}, Reg Loss={val_loss[1]}")
+                loss = loss.mean()  # scalar
 
-            logger.info(val_metrics.to_str(val_score))
+                # xxx ILTSS (distillation on features or logits)
+                if self.lde_flag:
+                    lde = self.lde * self.lde_loss(features1, features_old1)
 
-            # =====  Save Best Model  =====
-            if rank == 0:  # save best model at the last iteration
-                score = val_score['Mean IoU']
-                # best model to build incremental steps
-                save_ckpt(f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}.pth",
-                          model, trainer, optimizer, scheduler, cur_epoch, score)
-                logger.info("[!] Checkpoint saved.")
+                if self.lkd_flag:
+                    # resize new output to remove new logits and keep only the old ones
+                    lkd = self.lkd * self.lkd_loss(outputs, outputs_old)
 
-            # =====  Log metrics on Tensorboard =====
-            # visualize validation score and samples
-            logger.add_scalar("V-Loss", val_loss[0]+val_loss[1], cur_epoch)
-            logger.add_scalar("V-Loss-reg", val_loss[1], cur_epoch)
-            logger.add_scalar("V-Loss-cls", val_loss[0], cur_epoch)
-            logger.add_scalar("Val_Overall_Acc", val_score['Overall Acc'], cur_epoch)
-            logger.add_scalar("Val_MeanIoU", val_score['Mean IoU'], cur_epoch)
-            logger.add_table("Val_Class_IoU", val_score['Class IoU'], cur_epoch)
-            logger.add_table("Val_Acc_IoU", val_score['Class Acc'], cur_epoch)
-            # logger.add_figure("Val_Confusion_Matrix", val_score['Confusion Matrix'], cur_epoch)
+                # xxx first backprop of previous loss (compute the gradients for regularization methods)
+                loss_tot = loss + lkd + lde
 
-            # keep the metric to print them at the end of training
-            results["V-IoU"] = val_score['Class IoU']
-            results["V-Acc"] = val_score['Class Acc']
+#             with amp.scale_loss(loss_tot, optim) as scaled_loss:
+#                 scaled_loss.backward()
+            self.scaler.scale(loss_tot).backward()
 
-            for k, (img, target, lbl) in enumerate(ret_samples):
-                img = (denorm(img) * 255).astype(np.uint8)
-                target = label2color(target).transpose(2, 0, 1).astype(np.uint8)
-                lbl = label2color(lbl).transpose(2, 0, 1).astype(np.uint8)
+            # xxx Regularizer (EWC, RW, PI)
+            # if self.regularizer_flag:
+            #     if distributed.get_rank() == 0:
+            #         self.regularizer.update()
+            #     l_reg = self.reg_importance * self.regularizer.penalty()
+            #     if l_reg != 0.:
+            #         with amp.scale_loss(l_reg, optim) as scaled_loss:
+            #             scaled_loss.backward()
+                   
+#             optim.step()
+            if scheduler is not None:
+                scheduler.step()
 
-                concat_img = np.concatenate((img, target, lbl), axis=2)  # concat along width
-                logger.add_image(f'Sample_{k}', concat_img, cur_epoch)
+            self.scaler.step(optim)
+            self.scaler.update()
 
-        cur_epoch += 1
+            epoch_loss += loss.item()
+            reg_loss += l_reg.item() if l_reg != 0. else 0.
+            reg_loss += lkd.item() + lde.item()
+            interval_loss += loss.item() + lkd.item() + lde.item()
+            interval_loss += l_reg.item() if l_reg != 0. else 0.
 
-    # =====  Save Best Model at the end of training =====
-    if rank == 0 and TRAIN:  # save best model at the last iteration
-        # best model to build incremental steps
-        save_ckpt(f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}.pth",
-                  model, trainer, optimizer, scheduler, cur_epoch, best_score)
-        logger.info("[!] Checkpoint saved.")
+            if (cur_step + 1) % print_int == 0:
+                interval_loss = interval_loss / print_int
+                logger.info(f"Epoch {cur_epoch}, Batch {cur_step + 1}/{len(train_loader)},"
+                            f" Loss={interval_loss}")
+                logger.debug(f"Loss made of: CE {loss}, LKD {lkd}, LDE {lde}, LReg {l_reg}")
+                # visualization
+                if logger is not None:
+                    x = cur_epoch * len(train_loader) + cur_step + 1
+                    logger.add_scalar('Loss', interval_loss, x)
+                interval_loss = 0.0
 
-#     torch.distributed.barrier()
+        # collect statistics from multiple processes
+        epoch_loss = torch.tensor(epoch_loss).to(self.device)
+        reg_loss = torch.tensor(reg_loss).to(self.device)
 
-    # xxx From here starts the test code
-    logger.info("*** Test the model on all seen classes...")
-    # make data loader
-    test_loader = data.DataLoader(test_dst, batch_size=opts.batch_size if opts.crop_val else 1,
-                                  # sampler=DistributedSampler(test_dst, num_replicas=world_size, rank=rank),
-                                  num_workers=opts.num_workers)
+        # torch.distributed.reduce(epoch_loss, dst=0)
+        # torch.distributed.reduce(reg_loss, dst=0)
 
-    # load best model
-    if TRAIN:
-        model = make_model(opts, classes=tasks.get_per_task_classes(opts.dataset, opts.task, opts.step))
-        # Put the model on GPU
-#         model = DistributedDataParallel(model.cuda(device))
-        ckpt = f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}.pth"
-        checkpoint = torch.load(ckpt, map_location="cpu")
-        model.load_state_dict(checkpoint["model_state"])
-        logger.info(f"*** Model restored from {ckpt}")
-        del checkpoint
-        trainer = Trainer(model, None, device=device, opts=opts)
+        # if distributed.get_rank() == 0:
+        #     epoch_loss = epoch_loss / distributed.get_world_size() / len(train_loader)
+        #     reg_loss = reg_loss / distributed.get_world_size() / len(train_loader)
 
-    model = model.cuda()
-    model.eval()
+        logger.info(f"Epoch {cur_epoch}, Class Loss={epoch_loss}, Reg Loss={reg_loss}")
 
-    val_loss, val_score, _ = trainer.validate(loader=test_loader, metrics=val_metrics, logger=logger)
-    logger.print("Done test")
-    logger.info(f"*** End of Test, Total Loss={val_loss[0]+val_loss[1]},"
-                f" Class Loss={val_loss[0]}, Reg Loss={val_loss[1]}")
-    logger.info(val_metrics.to_str(val_score))
-    logger.add_table("Test_Class_IoU", val_score['Class IoU'])
-    logger.add_table("Test_Class_Acc", val_score['Class Acc'])
-    logger.add_figure("Test_Confusion_Matrix", val_score['Confusion Matrix'])
-    results["T-IoU"] = val_score['Class IoU']
-    results["T-Acc"] = val_score['Class Acc']
-    logger.add_results(results)
+        return (epoch_loss, reg_loss)
 
-    logger.add_scalar("T_Overall_Acc", val_score['Overall Acc'], opts.step)
-    logger.add_scalar("T_MeanIoU", val_score['Mean IoU'], opts.step)
-    logger.add_scalar("T_MeanAcc", val_score['Mean Acc'], opts.step)
+    def validate(self, loader, metrics, ret_samples_ids=None, logger=None):
+        """Do validation and return specified samples"""
+        metrics.reset()
+        model = self.model
+        device = self.device
+        criterion = self.criterion
+        model.eval()
 
-    logger.close()
+        class_loss = 0.0
+        reg_loss = 0.0
+        lkd = torch.tensor(0.)
+        lde = torch.tensor(0.)
+        l_icarl = torch.tensor(0.)
+        l_reg = torch.tensor(0.)
 
+        ret_samples = []
+        with torch.no_grad():
+            for i, (images, labels) in enumerate(loader):
 
-if __name__ == '__main__':
-    parser = argparser.get_argparser()
+                images = images.to(device, dtype=torch.float32)
+                labels = labels.to(device, dtype=torch.long)
 
-    opts = parser.parse_args()
-    opts = argparser.modify_command_options(opts)
+                if (self.lde_flag or self.lkd_flag) and self.model_old is not None:
+                    with torch.no_grad():
+                        outputs_old, features_old1, features_old2 = self.model_old(images, ret_intermediate=True)
 
-    os.makedirs("checkpoints/step", exist_ok=True)
+                outputs, features1, features2 = model(images, ret_intermediate=True)
 
-    main(opts)
+                # xxx BCE / Cross Entropy Loss
+                # if not self.icarl_only_dist:
+                loss = criterion(outputs, labels)  # B x H x W
+                # else:
+                #     loss = self.licarl(outputs, labels, torch.sigmoid(outputs_old))
+
+                loss = loss.mean()  # scalar
+
+                # if self.icarl_combined:
+                #     # tensor.narrow( dim, start, end) -> slice tensor from start to end in the specified dim
+                #     n_cl_old = outputs_old.shape[1]
+                #     # use n_cl_old to sum the contribution of each class, and not to average them (as done in our BCE).
+                #     l_icarl = self.icarl * n_cl_old * self.licarl(outputs.narrow(1, 0, n_cl_old),
+                #                                                   torch.sigmoid(outputs_old))
+
+                # xxx ILTSS (distillation on features or logits)
+                if self.lde_flag:
+                    lde = self.lde_loss(features1, features_old1)
+
+                if self.lkd_flag:
+                    lkd = self.lkd_loss(outputs, outputs_old)
+
+                # xxx Regularizer (EWC, RW, PI)
+                if self.regularizer_flag:
+                    l_reg = self.regularizer.penalty()
+
+                class_loss += loss.item()
+                reg_loss += l_reg.item() if l_reg != 0. else 0.
+                reg_loss += lkd.item() + lde.item()
+
+                _, prediction = outputs.max(dim=1)
+
+                labels = labels.cpu().numpy()
+                prediction = prediction.cpu().numpy()
+                metrics.update(labels, prediction)
+
+                if ret_samples_ids is not None and i in ret_samples_ids:  # get samples
+                    ret_samples.append((images[0].detach().cpu().numpy(),
+                                        labels[0],
+                                        prediction[0]))
+
+            # collect statistics from multiple processes
+            metrics.synch(device)
+            score = metrics.get_results()
+
+            class_loss = torch.tensor(class_loss).to(self.device)
+            reg_loss = torch.tensor(reg_loss).to(self.device)
+
+            # torch.distributed.reduce(class_loss, dst=0)
+            # torch.distributed.reduce(reg_loss, dst=0)
+
+            # if distributed.get_rank() == 0:
+            #     class_loss = class_loss / distributed.get_world_size() / len(loader)
+            #     reg_loss = reg_loss / distributed.get_world_size() / len(loader)
+
+            if logger is not None:
+                logger.info(f"Validation, Class Loss={class_loss}, Reg Loss={reg_loss} (without scaling)")
+
+        return (class_loss, reg_loss), score, ret_samples
+
+    def state_dict(self):
+        state = {"regularizer": self.regularizer.state_dict() if self.regularizer_flag else None}
+
+        return state
+
+    def load_state_dict(self, state):
+        if state["regularizer"] is not None and self.regularizer is not None:
+            self.regularizer.load_state_dict(state["regularizer"])
