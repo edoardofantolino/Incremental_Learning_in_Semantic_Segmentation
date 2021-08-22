@@ -300,7 +300,7 @@ def main(opts):
             if rank == 0:  # save best model at the last iteration
                 score = val_score['Mean IoU']
                 # best model to build incremental steps
-                save_ckpt(f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}.pth",
+                save_ckpt(f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}_{opts.backbone}.pth",
                           model, trainer, optimizer, scheduler, cur_epoch, score)
                 logger.info("[!] Checkpoint saved.")
 
@@ -332,7 +332,7 @@ def main(opts):
     # =====  Save Best Model at the end of training =====
     if rank == 0 and TRAIN:  # save best model at the last iteration
         # best model to build incremental steps
-        save_ckpt(f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}.pth",
+        save_ckpt(f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}_{opts.backbone}.pth",
                   model, trainer, optimizer, scheduler, cur_epoch, best_score)
         logger.info("[!] Checkpoint saved.")
 
@@ -350,7 +350,7 @@ def main(opts):
         model = make_model(opts, classes=tasks.get_per_task_classes(opts.dataset, opts.task, opts.step))
         # Put the model on GPU
 #         model = DistributedDataParallel(model.cuda(device))
-        ckpt = f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}.pth"
+        ckpt = f"/content/gdrive/MyDrive/final_101/{task_name}_{opts.name}_{opts.step}_{cur_epoch}_{opts.backbone}.pth"
         checkpoint = torch.load(ckpt, map_location="cpu")
         model.load_state_dict(checkpoint["model_state"])
         logger.info(f"*** Model restored from {ckpt}")
