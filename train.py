@@ -54,7 +54,7 @@ class Trainer:
         self.reg_importance = opts.reg_importance
 
         self.ret_intermediate = self.lde
-        self.scaler=torch.cuda.amp.GradScaler()
+#         self.scaler=torch.cuda.amp.GradScaler()
 
     def train(self, cur_epoch, optim, train_loader, scheduler=None, print_int=10, logger=None):
         """Train and return epoch loss"""
@@ -79,35 +79,36 @@ class Trainer:
             images = images.to(device, dtype=torch.float32)
             labels = labels.to(device, dtype=torch.long)
 
-            with torch.cuda.amp.autocast():
-                if (self.lde_flag or self.lkd_flag) and self.model_old is not None:
-                    with torch.no_grad():
-                        outputs_old, features_old1, feature_old2 = self.model_old(images, ret_intermediate=True)
+#             with torch.cuda.amp.autocast():
+            if (self.lde_flag or self.lkd_flag) and self.model_old is not None:
+                with torch.no_grad():
+                    outputs_old, features_old1, feature_old2 = self.model_old(images, ret_intermediate=True)
 
-                optim.zero_grad()
-                outputs, features1, features2 = model(images, ret_intermediate=True)
+            optim.zero_grad()
+            outputs, features1, features2 = model(images, ret_intermediate=True)
 
-                # xxx BCE / Cross Entropy Loss
-                loss = criterion(outputs, labels)
-                loss = loss + criterion(features1, labels)
-                loss = loss + criterion(features2, labels)
+            # xxx BCE / Cross Entropy Loss
+            loss = criterion(outputs, labels)
+            loss = loss + criterion(features1, labels)
+            loss = loss + criterion(features2, labels)
 
-                loss = loss.mean()  # scalar
+            loss = loss.mean()  # scalar
 
-                # xxx ILTSS (distillation on features or logits)
-                if self.lde_flag:
-                    lde = self.lde * self.lde_loss(features1, features_old1)
+            # xxx ILTSS (distillation on features or logits)
+            if self.lde_flag:
+                lde = self.lde * self.lde_loss(features1, features_old1)
 
-                if self.lkd_flag:
-                    # resize new output to remove new logits and keep only the old ones
-                    lkd = self.lkd * self.lkd_loss(outputs, outputs_old)
+            if self.lkd_flag:
+                # resize new output to remove new logits and keep only the old ones
+                lkd = self.lkd * self.lkd_loss(outputs, outputs_old)
 
-                # xxx first backprop of previous loss (compute the gradients for regularization methods)
-                loss_tot = loss + lkd + lde
+            # xxx first backprop of previous loss (compute the gradients for regularization methods)
+            loss_tot = loss + lkd + lde
 
 #             with amp.scale_loss(loss_tot, optim) as scaled_loss:
 #                 scaled_loss.backward()
-            self.scaler.scale(loss_tot).backward()
+#             self.scaler.scale(loss_tot).backward()
+            loss_tot.backward()
 
             # xxx Regularizer (EWC, RW, PI)
             # if self.regularizer_flag:
@@ -122,8 +123,9 @@ class Trainer:
             if scheduler is not None:
                 scheduler.step()
 
-            self.scaler.step(optim)
-            self.scaler.update()
+#             self.scaler.step(optim)
+#             self.scaler.update()
+            optim.step()
 
             epoch_loss += loss.item()
             reg_loss += l_reg.item() if l_reg != 0. else 0.
