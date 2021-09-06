@@ -106,7 +106,15 @@ class UnbiasedCrossEntropy(nn.Module):
 
         loss = F.nll_loss(outputs, labels, ignore_index=self.ignore_index, reduction=self.reduction)
 
-        return loss
+        # print("you are using unbiased cross entropy (focal)")
+
+        alpha = 2
+        gamma = 1.5
+        pt = torch.exp(-loss)
+        focal_loss = alpha * (1-pt)**gamma * loss
+
+
+        return focal_loss.mean()
 
 
 class KnowledgeDistillationLoss(nn.Module):
