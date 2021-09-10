@@ -1,6 +1,6 @@
 # Incremental Learning in Semantic Segmentation
 
-##Course: 
+## Course: 
 Machine Learning and Deep Learning
 
 Master Degree in Data Science and Engineering
