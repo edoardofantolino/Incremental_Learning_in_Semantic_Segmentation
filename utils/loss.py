@@ -86,12 +86,14 @@ class IcarlLoss(nn.Module):
             return loss
 
 
-class UnbiasedCrossEntropy(nn.Module):
-    def __init__(self, old_cl=None, reduction='mean', ignore_index=255):
+class FocalUnbiasedCrossEntropy(nn.Module):
+    def __init__(self, old_cl=None, reduction='mean', ignore_index=255, alpha=1, gamma=2):
         super().__init__()
         self.reduction = reduction
         self.ignore_index = ignore_index
         self.old_cl = old_cl
+        self.alpha = alpha
+        self.gamma = gamma
 
     def forward(self, inputs, targets):
 
@@ -106,13 +108,8 @@ class UnbiasedCrossEntropy(nn.Module):
 
         loss = F.nll_loss(outputs, labels, ignore_index=self.ignore_index, reduction=self.reduction)
 
-        # print("you are using unbiased cross entropy (focal)")
-
-        alpha = 2
-        gamma = 1.5
         pt = torch.exp(-loss)
-        focal_loss = alpha * (1-pt)**gamma * loss
-
+        focal_loss = self.alpha * (1-pt)**self.gamma * loss
 
         return focal_loss.mean()
 
