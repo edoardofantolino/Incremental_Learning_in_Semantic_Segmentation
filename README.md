@@ -1,6 +1,5 @@
-# MLDLproject4
+# Incremental Learning in Semantic Segmentation
 
-Incremental Learning in Semantic Segmentation
 Course: Machine Learning and Deep Learning
 Master Degree in Data Science and Engineering
 
