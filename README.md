@@ -10,4 +10,4 @@ Macchia Beatrice.
 
 Politecnico di Torino
 
-The code is modified taking inspiration from: https://github.com/fcdl94/MiB
+The code is a modified version of: https://github.com/fcdl94/MiB provided by Cermelli Fabio.
