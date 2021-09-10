@@ -31,7 +31,7 @@ class Trainer:
             self.criterion = BCEWithLogitsLossWithIgnoreIndex(reduction=reduction)
         elif opts.unce and self.old_classes != 0:
             self.criterion = UnbiasedCrossEntropy(old_cl=self.old_classes, ignore_index=255, reduction=reduction)
-#             self.criterion = FocalUnbasedCrossEntropy(old_cl=self.old_classes, ignore_index=255, reduction=reduction)
+#             self.criterion = FocalUnbiasedCrossEntropy(old_cl=self.old_classes, ignore_index=255, reduction=reduction)
         else:
             self.criterion = nn.CrossEntropyLoss(ignore_index=255)
 
